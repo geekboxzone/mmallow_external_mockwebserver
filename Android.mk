@@ -27,6 +27,6 @@ ifeq ($(WITH_HOST_DALVIK),true)
     include $(CLEAR_VARS)
     LOCAL_SRC_FILES := $(mockwebserver_src_files)
     LOCAL_MODULE_TAGS := optional
-    LOCAL_MODULE := mockwebserver-hostdex
+    LOCAL_MODULE := mockwebserver-host
     include $(BUILD_HOST_JAVA_LIBRARY)
 endif
