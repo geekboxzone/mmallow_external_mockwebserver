@@ -479,17 +479,29 @@ public final class MockWebServer {
         out.write(("\r\n").getBytes(ASCII));
         out.flush();
 
-        byte[] body = response.getBody();
-        int bytesPerSecond = response.getBytesPerSecond();
+        final InputStream in = response.getBodyStream();
+        final int bytesPerSecond = response.getBytesPerSecond();
 
-        for (int offset = 0; offset < body.length; offset += bytesPerSecond) {
-            int count = Math.min(body.length - offset, bytesPerSecond);
-            out.write(body, offset, count);
+        // Stream data in MTU-sized increments
+        final byte[] buffer = new byte[1452];
+        final long delayMs;
+        if (bytesPerSecond == Integer.MAX_VALUE) {
+            delayMs = 0;
+        } else {
+            delayMs = (1000 * buffer.length) / bytesPerSecond;
+        }
+
+        int read;
+        long sinceDelay = 0;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
             out.flush();
 
-            if (offset + count < body.length) {
+            sinceDelay += read;
+            if (sinceDelay >= buffer.length && delayMs > 0) {
+                sinceDelay %= buffer.length;
                 try {
-                    Thread.sleep(1000);
+                    Thread.sleep(delayMs);
                 } catch (InterruptedException e) {
                     throw new AssertionError();
                 }
