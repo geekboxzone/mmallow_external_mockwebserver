@@ -51,6 +51,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -68,8 +69,8 @@ public final class MockWebServer {
     private static final Logger logger = Logger.getLogger(MockWebServer.class.getName());
     private final BlockingQueue<RecordedRequest> requestQueue
             = new LinkedBlockingQueue<RecordedRequest>();
-    private final BlockingQueue<MockResponse> responseQueue
-            = new LinkedBlockingDeque<MockResponse>();
+    private final BlockingQueue<BaseMockResponse<?>> responseQueue
+            = new LinkedBlockingDeque<BaseMockResponse<?>>();
     private final Set<Socket> openClientSockets
             = Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private boolean singleResponse;
@@ -158,8 +159,12 @@ public final class MockWebServer {
         return requestCount.get();
     }
 
-    public void enqueue(MockResponse response) {
-        responseQueue.add(response.clone());
+    public void enqueue(BaseMockResponse<?> response) {
+        if (response instanceof MockResponse) {
+            responseQueue.add(((MockResponse) response).clone());
+        } else {
+            responseQueue.add(response);
+        }
     }
 
     /**
@@ -236,7 +241,7 @@ public final class MockWebServer {
                     } catch (SocketException ignored) {
                         continue;
                     }
-                    MockResponse peek = responseQueue.peek();
+                    BaseMockResponse<?> peek = responseQueue.peek();
                     if (peek != null && peek.getSocketPolicy() == DISCONNECT_AT_START) {
                         responseQueue.take();
                         socket.close();
@@ -274,7 +279,7 @@ public final class MockWebServer {
                     if (tunnelProxy) {
                         createTunnel();
                     }
-                    MockResponse response = responseQueue.peek();
+                    BaseMockResponse<?> response = responseQueue.peek();
                     if (response != null && response.getSocketPolicy() == FAIL_HANDSHAKE) {
                         processHandshakeFailure(raw, sequenceNumber++);
                         return;
@@ -312,7 +317,7 @@ public final class MockWebServer {
              */
             private void createTunnel() throws IOException, InterruptedException {
                 while (true) {
-                    MockResponse connect = responseQueue.peek();
+                    BaseMockResponse<?> connect = responseQueue.peek();
                     if (!processOneRequest(raw, raw.getInputStream(), raw.getOutputStream())) {
                         throw new IllegalStateException("Tunnel without any CONNECT!");
                     }
@@ -332,8 +337,8 @@ public final class MockWebServer {
                 if (request == null) {
                     return false;
                 }
-                MockResponse response = dispatch(request);
-                writeResponse(out, response);
+                BaseMockResponse<?> response = dispatch(request);
+                response.writeResponse(out);
                 if (response.getSocketPolicy() == SocketPolicy.DISCONNECT_AT_END) {
                     in.close();
                     out.close();
@@ -450,7 +455,7 @@ public final class MockWebServer {
     /**
      * Returns a response to satisfy {@code request}.
      */
-    private MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+    private BaseMockResponse<?> dispatch(RecordedRequest request) throws InterruptedException {
         if (responseQueue.isEmpty()) {
             throw new IllegalStateException("Unexpected request: " + request);
         }
@@ -468,44 +473,6 @@ public final class MockWebServer {
             requestCount.incrementAndGet();
             requestQueue.add(request);
             return responseQueue.take();
-        }
-    }
-
-    private void writeResponse(OutputStream out, MockResponse response) throws IOException {
-        out.write((response.getStatus() + "\r\n").getBytes(ASCII));
-        for (String header : response.getHeaders()) {
-            out.write((header + "\r\n").getBytes(ASCII));
-        }
-        out.write(("\r\n").getBytes(ASCII));
-        out.flush();
-
-        final InputStream in = response.getBodyStream();
-        final int bytesPerSecond = response.getBytesPerSecond();
-
-        // Stream data in MTU-sized increments
-        final byte[] buffer = new byte[1452];
-        final long delayMs;
-        if (bytesPerSecond == Integer.MAX_VALUE) {
-            delayMs = 0;
-        } else {
-            delayMs = (1000 * buffer.length) / bytesPerSecond;
-        }
-
-        int read;
-        long sinceDelay = 0;
-        while ((read = in.read(buffer)) != -1) {
-            out.write(buffer, 0, read);
-            out.flush();
-
-            sinceDelay += read;
-            if (sinceDelay >= buffer.length && delayMs > 0) {
-                sinceDelay %= buffer.length;
-                try {
-                    Thread.sleep(delayMs);
-                } catch (InterruptedException e) {
-                    throw new AssertionError();
-                }
-            }
         }
     }
 
