@@ -18,14 +18,12 @@ package com.google.mockwebserver;
 
 import static com.google.mockwebserver.SocketPolicy.DISCONNECT_AT_START;
 import static com.google.mockwebserver.SocketPolicy.FAIL_HANDSHAKE;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
@@ -38,20 +36,17 @@ import java.net.UnknownHostException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -69,17 +64,15 @@ public final class MockWebServer {
     private static final Logger logger = Logger.getLogger(MockWebServer.class.getName());
     private final BlockingQueue<RecordedRequest> requestQueue
             = new LinkedBlockingQueue<RecordedRequest>();
-    private final BlockingQueue<BaseMockResponse<?>> responseQueue
-            = new LinkedBlockingDeque<BaseMockResponse<?>>();
-    private final Set<Socket> openClientSockets
-            = Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
-    private boolean singleResponse;
+    /** All map values are Boolean.TRUE. (Collections.newSetFromMap isn't available in Froyo) */
+    private final Map<Socket, Boolean> openClientSockets = new ConcurrentHashMap<Socket, Boolean>();
     private final AtomicInteger requestCount = new AtomicInteger();
     private int bodyLimit = Integer.MAX_VALUE;
     private ServerSocket serverSocket;
     private SSLSocketFactory sslSocketFactory;
     private ExecutorService executor;
     private boolean tunnelProxy;
+    private Dispatcher dispatcher = new QueueDispatcher();
 
     private int port = -1;
 
@@ -107,10 +100,14 @@ public final class MockWebServer {
      *
      * @param path the request path, such as "/".
      */
-    public URL getUrl(String path) throws MalformedURLException, UnknownHostException {
-        return sslSocketFactory != null
-                ? new URL("https://" + getHostName() + ":" + getPort() + path)
-                : new URL("http://" + getHostName() + ":" + getPort() + path);
+    public URL getUrl(String path) {
+        try {
+            return sslSocketFactory != null
+                    ? new URL("https://" + getHostName() + ":" + getPort() + path)
+                    : new URL("http://" + getHostName() + ":" + getPort() + path);
+        } catch (MalformedURLException e) {
+            throw new AssertionError(e);
+        }
     }
 
     /**
@@ -159,25 +156,16 @@ public final class MockWebServer {
         return requestCount.get();
     }
 
-    public void enqueue(BaseMockResponse<?> response) {
-        if (response instanceof MockResponse) {
-            responseQueue.add(((MockResponse) response).clone());
-        } else {
-            responseQueue.add(response);
-        }
-    }
-
     /**
-     * By default, this class processes requests coming in by adding them to a
-     * queue and serves responses by removing them from another queue. This mode
-     * is appropriate for correctness testing.
+     * Scripts {@code response} to be returned to a request made in sequence.
+     * The first request is served by the first enqueued response; the second
+     * request by the second enqueued response; and so on.
      *
-     * <p>Serving a single response causes the server to be stateless: requests
-     * are not enqueued, and responses are not dequeued. This mode is appropriate
-     * for benchmarking.
+     * @throws ClassCastException if the default dispatcher has been replaced
+     *     with {@link #setDispatcher(Dispatcher)}.
      */
-    public void setSingleResponse(boolean singleResponse) {
-        this.singleResponse = singleResponse;
+    public void enqueue(MockResponse response) {
+        ((QueueDispatcher) dispatcher).enqueueResponse(response.clone());
     }
 
     /**
@@ -218,7 +206,7 @@ public final class MockWebServer {
                 } catch (Throwable e) {
                     logger.log(Level.WARNING, "MockWebServer server socket close failed", e);
                 }
-                for (Iterator<Socket> s = openClientSockets.iterator(); s.hasNext();) {
+                for (Iterator<Socket> s = openClientSockets.keySet().iterator(); s.hasNext(); ) {
                     try {
                         s.next().close();
                         s.remove();
@@ -234,22 +222,22 @@ public final class MockWebServer {
             }
 
             private void acceptConnections() throws Exception {
-                do {
+                while (true) {
                     Socket socket;
                     try {
                         socket = serverSocket.accept();
-                    } catch (SocketException ignored) {
-                        continue;
+                    } catch (SocketException e) {
+                        return;
                     }
-                    BaseMockResponse<?> peek = responseQueue.peek();
-                    if (peek != null && peek.getSocketPolicy() == DISCONNECT_AT_START) {
-                        responseQueue.take();
+                    final SocketPolicy socketPolicy = dispatcher.peekSocketPolicy();
+                    if (socketPolicy == DISCONNECT_AT_START) {
+                        dispatchBookkeepingRequest(0, socket);
                         socket.close();
                     } else {
-                        openClientSockets.add(socket);
+                        openClientSockets.put(socket, true);
                         serveConnection(socket);
                     }
-                } while (!responseQueue.isEmpty());
+                }
             }
         }));
     }
@@ -279,15 +267,16 @@ public final class MockWebServer {
                     if (tunnelProxy) {
                         createTunnel();
                     }
-                    BaseMockResponse<?> response = responseQueue.peek();
-                    if (response != null && response.getSocketPolicy() == FAIL_HANDSHAKE) {
+                    final SocketPolicy socketPolicy = dispatcher.peekSocketPolicy();
+                    if (socketPolicy == FAIL_HANDSHAKE) {
+                        dispatchBookkeepingRequest(sequenceNumber, raw);
                         processHandshakeFailure(raw, sequenceNumber++);
                         return;
                     }
                     socket = sslSocketFactory.createSocket(
                             raw, raw.getInetAddress().getHostAddress(), raw.getPort(), true);
                     ((SSLSocket) socket).setUseClientMode(false);
-                    openClientSockets.add(socket);
+                    openClientSockets.put(socket, true);
                     openClientSockets.remove(raw);
                 } else {
                     socket = raw;
@@ -296,7 +285,8 @@ public final class MockWebServer {
                 InputStream in = new BufferedInputStream(socket.getInputStream());
                 OutputStream out = new BufferedOutputStream(socket.getOutputStream());
 
-                while (!responseQueue.isEmpty() && processOneRequest(socket, in, out)) {}
+                while (processOneRequest(socket, in, out)) {
+                }
 
                 if (sequenceNumber == 0) {
                     logger.warning("MockWebServer connection didn't make a request");
@@ -305,9 +295,6 @@ public final class MockWebServer {
                 in.close();
                 out.close();
                 socket.close();
-                if (responseQueue.isEmpty()) {
-                    shutdown();
-                }
                 openClientSockets.remove(socket);
             }
 
@@ -317,11 +304,11 @@ public final class MockWebServer {
              */
             private void createTunnel() throws IOException, InterruptedException {
                 while (true) {
-                    BaseMockResponse<?> connect = responseQueue.peek();
+                    final SocketPolicy socketPolicy = dispatcher.peekSocketPolicy();
                     if (!processOneRequest(raw, raw.getInputStream(), raw.getOutputStream())) {
                         throw new IllegalStateException("Tunnel without any CONNECT!");
                     }
-                    if (connect.getSocketPolicy() == SocketPolicy.UPGRADE_TO_SSL_AT_END) {
+                    if (socketPolicy == SocketPolicy.UPGRADE_TO_SSL_AT_END) {
                         return;
                     }
                 }
@@ -337,8 +324,10 @@ public final class MockWebServer {
                 if (request == null) {
                     return false;
                 }
-                BaseMockResponse<?> response = dispatch(request);
-                response.writeResponse(out);
+                requestCount.incrementAndGet();
+                requestQueue.add(request);
+                MockResponse response = dispatcher.dispatch(request);
+                writeResponse(out, response);
                 if (response.getSocketPolicy() == SocketPolicy.DISCONNECT_AT_END) {
                     in.close();
                     out.close();
@@ -355,7 +344,6 @@ public final class MockWebServer {
     }
 
     private void processHandshakeFailure(Socket raw, int sequenceNumber) throws Exception {
-        responseQueue.take();
         X509TrustManager untrusted = new X509TrustManager() {
             @Override public void checkClientTrusted(X509Certificate[] chain, String authType)
                     throws CertificateException {
@@ -379,8 +367,11 @@ public final class MockWebServer {
         } catch (IOException expected) {
         }
         socket.close();
+    }
+
+    private void dispatchBookkeepingRequest(int sequenceNumber, Socket socket) throws InterruptedException {
         requestCount.incrementAndGet();
-        requestQueue.add(new RecordedRequest(null, null, null, -1, null, sequenceNumber, socket));
+        dispatcher.dispatch(new RecordedRequest(null, null, null, -1, null, sequenceNumber, socket));
     }
 
     /**
@@ -394,7 +385,7 @@ public final class MockWebServer {
         } catch (IOException streamIsClosed) {
             return null; // no request because we closed the stream
         }
-        if (request.isEmpty()) {
+        if (request.length() == 0) {
             return null; // no request because the stream is exhausted
         }
 
@@ -402,7 +393,7 @@ public final class MockWebServer {
         int contentLength = -1;
         boolean chunked = false;
         String header;
-        while (!(header = readAsciiUntilCrlf(in)).isEmpty()) {
+        while ((header = readAsciiUntilCrlf(in)).length() != 0) {
             headers.add(header);
             String lowercaseHeader = header.toLowerCase();
             if (contentLength == -1 && lowercaseHeader.startsWith("content-length:")) {
@@ -436,15 +427,11 @@ public final class MockWebServer {
 
         if (request.startsWith("OPTIONS ") || request.startsWith("GET ")
                 || request.startsWith("HEAD ") || request.startsWith("DELETE ")
-                || request .startsWith("TRACE ") || request.startsWith("CONNECT ")) {
+                || request.startsWith("TRACE ") || request.startsWith("CONNECT ")) {
             if (hasBody) {
                 throw new IllegalArgumentException("Request must not have a body: " + request);
             }
-        } else if (request.startsWith("POST ") || request.startsWith("PUT ")) {
-            if (!hasBody) {
-                throw new IllegalArgumentException("Request must have a body: " + request);
-            }
-        } else {
+        } else if (!request.startsWith("POST ") && !request.startsWith("PUT ")) {
             throw new UnsupportedOperationException("Unexpected method: " + request);
         }
 
@@ -452,27 +439,44 @@ public final class MockWebServer {
                 requestBody.numBytesReceived, requestBody.toByteArray(), sequenceNumber, socket);
     }
 
-    /**
-     * Returns a response to satisfy {@code request}.
-     */
-    private BaseMockResponse<?> dispatch(RecordedRequest request) throws InterruptedException {
-        if (responseQueue.isEmpty()) {
-            throw new IllegalStateException("Unexpected request: " + request);
+    private void writeResponse(OutputStream out, MockResponse response) throws IOException {
+        out.write((response.getStatus() + "\r\n").getBytes(ASCII));
+        for (String header : response.getHeaders()) {
+            out.write((header + "\r\n").getBytes(ASCII));
         }
+        out.write(("\r\n").getBytes(ASCII));
+        out.flush();
 
-        // to permit interactive/browser testing, ignore requests for favicons
-        if (request.getRequestLine().equals("GET /favicon.ico HTTP/1.1")) {
-            System.out.println("served " + request.getRequestLine());
-            return new MockResponse()
-                        .setResponseCode(HttpURLConnection.HTTP_NOT_FOUND);
+        final InputStream in = response.getBodyStream();
+        if (in == null) {
+            return;
         }
+        final int bytesPerSecond = response.getBytesPerSecond();
 
-        if (singleResponse) {
-            return responseQueue.peek();
+        // Stream data in MTU-sized increments
+        final byte[] buffer = new byte[1452];
+        final long delayMs;
+        if (bytesPerSecond == Integer.MAX_VALUE) {
+            delayMs = 0;
         } else {
-            requestCount.incrementAndGet();
-            requestQueue.add(request);
-            return responseQueue.take();
+            delayMs = (1000 * buffer.length) / bytesPerSecond;
+        }
+
+        int read;
+        long sinceDelay = 0;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+            out.flush();
+
+            sinceDelay += read;
+            if (sinceDelay >= buffer.length && delayMs > 0) {
+                sinceDelay %= buffer.length;
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException e) {
+                    throw new AssertionError();
+                }
+            }
         }
     }
 
@@ -513,9 +517,22 @@ public final class MockWebServer {
 
     private void readEmptyLine(InputStream in) throws IOException {
         String line = readAsciiUntilCrlf(in);
-        if (!line.isEmpty()) {
+        if (line.length() != 0) {
             throw new IllegalStateException("Expected empty but was: " + line);
         }
+    }
+
+    /**
+     * Sets the dispatcher used to match incoming requests to mock responses.
+     * The default dispatcher simply serves a fixed sequence of responses from
+     * a {@link #enqueue(MockResponse) queue}; custom dispatchers can vary the
+     * response based on timing or the content of the request.
+     */
+    public void setDispatcher(Dispatcher dispatcher) {
+        if (dispatcher == null) {
+            throw new NullPointerException();
+        }
+        this.dispatcher = dispatcher;
     }
 
     /**

@@ -17,6 +17,7 @@
 package com.google.mockwebserver;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -24,19 +25,76 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLConnection;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import junit.framework.TestCase;
 
 public final class MockWebServerTest extends TestCase {
 
     private MockWebServer server = new MockWebServer();
 
-    @Override protected void setUp() throws Exception {
-        super.setUp();
-    }
-
     @Override protected void tearDown() throws Exception {
         server.shutdown();
         super.tearDown();
+    }
+
+    public void testRecordedRequestAccessors() {
+        List<String> headers = Arrays.asList(
+                "User-Agent: okhttp",
+                "Cookie: s=square",
+                "Cookie: a=android",
+                "X-Whitespace:  left",
+                "X-Whitespace:right  ",
+                "X-Whitespace:  both  "
+        );
+        List<Integer> chunkSizes = Collections.emptyList();
+        byte[] body = {'A', 'B', 'C'};
+        String requestLine = "GET / HTTP/1.1";
+        RecordedRequest request = new RecordedRequest(
+                requestLine, headers, chunkSizes, body.length, body, 0, null);
+        assertEquals("s=square", request.getHeader("cookie"));
+        assertEquals(Arrays.asList("s=square", "a=android"), request.getHeaders("cookie"));
+        assertEquals("left", request.getHeader("x-whitespace"));
+        assertEquals(Arrays.asList("left", "right", "both"), request.getHeaders("x-whitespace"));
+        assertEquals("ABC", request.getUtf8Body());
+    }
+
+    public void testDefaultMockResponse() {
+        MockResponse response = new MockResponse();
+        assertEquals(Arrays.asList("Content-Length: 0"), response.getHeaders());
+        assertEquals("HTTP/1.1 200 OK", response.getStatus());
+    }
+
+    public void testSetBodyAdjustsHeaders() throws IOException {
+        MockResponse response = new MockResponse().setBody("ABC");
+        assertEquals(Arrays.asList("Content-Length: 3"), response.getHeaders());
+        InputStream in = response.getBodyStream();
+        assertEquals('A', in.read());
+        assertEquals('B', in.read());
+        assertEquals('C', in.read());
+        assertEquals(-1, in.read());
+        assertEquals("HTTP/1.1 200 OK", response.getStatus());
+    }
+
+    public void testMockResponseAddHeader() {
+        MockResponse response = new MockResponse()
+                .clearHeaders()
+                .addHeader("Cookie: s=square")
+                .addHeader("Cookie", "a=android");
+        assertEquals(Arrays.asList("Cookie: s=square", "Cookie: a=android"),
+                response.getHeaders());
+    }
+
+    public void testMockResponseSetHeader() {
+        MockResponse response = new MockResponse()
+                .clearHeaders()
+                .addHeader("Cookie: s=square")
+                .addHeader("Cookie: a=android")
+                .addHeader("Cookies: delicious");
+        response.setHeader("cookie", "r=robot");
+        assertEquals(Arrays.asList("Cookies: delicious", "cookie: r=robot"),
+                response.getHeaders());
     }
 
     public void testRegularResponse() throws Exception {
@@ -73,6 +131,29 @@ public final class MockWebServerTest extends TestCase {
         assertEquals("GET / HTTP/1.1", first.getRequestLine());
         RecordedRequest redirect = server.takeRequest();
         assertEquals("GET /new-path HTTP/1.1", redirect.getRequestLine());
+    }
+
+    /**
+     * Test that MockWebServer blocks for a call to enqueue() if a request
+     * is made before a mock response is ready.
+     */
+    public void testDispatchBlocksWaitingForEnqueue() throws Exception {
+        server.play();
+
+        new Thread() {
+            @Override public void run() {
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ignored) {
+                }
+                server.enqueue(new MockResponse().setBody("enqueued in the background"));
+            }
+        }.start();
+
+        URLConnection connection = server.getUrl("/").openConnection();
+        InputStream in = connection.getInputStream();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+        assertEquals("enqueued in the background", reader.readLine());
     }
 
     public void testNonHexadecimalChunkSize() throws Exception {
@@ -121,5 +202,31 @@ public final class MockWebServerTest extends TestCase {
 
         assertEquals(0, server.takeRequest().getSequenceNumber());
         assertEquals(0, server.takeRequest().getSequenceNumber());
+    }
+
+    public void testDisconnectAtStart() throws Exception {
+        server.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START));
+        server.enqueue(new MockResponse()); // The jdk's HttpUrlConnection is a bastard.
+        server.enqueue(new MockResponse());
+        server.play();
+        try {
+            server.getUrl("/a").openConnection().getInputStream();
+        } catch (IOException e) {
+            // Expected.
+        }
+        server.getUrl("/b").openConnection().getInputStream(); // Should succeed.
+    }
+
+    public void testStreamingResponseBody() throws Exception {
+        InputStream responseBody = new ByteArrayInputStream("ABC".getBytes("UTF-8"));
+        server.enqueue(new MockResponse().setBody(responseBody, 3));
+        server.play();
+
+        InputStream in = server.getUrl("/").openConnection().getInputStream();
+        assertEquals('A', in.read());
+        assertEquals('B', in.read());
+        assertEquals('C', in.read());
+
+        assertEquals(-1, responseBody.read()); // The body is exhausted.
     }
 }
