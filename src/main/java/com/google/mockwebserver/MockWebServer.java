@@ -374,7 +374,10 @@ public final class MockWebServer {
 
     private void dispatchBookkeepingRequest(int sequenceNumber, Socket socket) throws InterruptedException {
         requestCount.incrementAndGet();
-        dispatcher.dispatch(new RecordedRequest(null, null, null, -1, null, sequenceNumber, socket));
+        RecordedRequest request = new RecordedRequest(null, null, null, -1, null, sequenceNumber,
+                socket);
+        dispatcher.dispatch(request);
+        requestQueue.add(request);
     }
 
     /**
