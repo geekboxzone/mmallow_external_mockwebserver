@@ -162,6 +162,6 @@ public final class RecordedRequest {
     }
 
     @Override public String toString() {
-        return requestLine;
+        return "RecordedRequest {" + requestLine + "}";
     }
 }

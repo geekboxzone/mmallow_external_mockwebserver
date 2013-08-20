@@ -235,6 +235,6 @@ public final class MockResponse implements Cloneable {
     }
 
     @Override public String toString() {
-        return status;
+        return "MockResponse{" + status + "}";
     }
 }
