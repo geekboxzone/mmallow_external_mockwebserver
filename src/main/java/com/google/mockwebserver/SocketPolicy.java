@@ -51,6 +51,12 @@ public enum SocketPolicy {
     DISCONNECT_AT_START,
 
     /**
+     * Request immediate close of connection after reading the entire
+     * request (and before any response is sent).
+     */
+    DISCONNECT_AFTER_READING_REQUEST,
+
+    /**
      * Don't trust the client during the SSL handshake.
      */
     FAIL_HANDSHAKE,
