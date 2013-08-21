@@ -330,6 +330,10 @@ public final class MockWebServer {
                 requestCount.incrementAndGet();
                 requestQueue.add(request);
                 MockResponse response = dispatcher.dispatch(request);
+                if (response.getSocketPolicy() == SocketPolicy.DISCONNECT_AFTER_READING_REQUEST) {
+                  logger.info("Received request: " + request + " and disconnected without responding");
+                  return false;
+                }
                 writeResponse(out, response);
                 if (response.getSocketPolicy() == SocketPolicy.DISCONNECT_AT_END) {
                     in.close();
