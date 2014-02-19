@@ -18,8 +18,13 @@ package com.google.mockwebserver;
 
 import java.io.UnsupportedEncodingException;
 import java.net.Socket;
+import java.security.Principal;
+import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.List;
+
+import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 
 /**
@@ -35,6 +40,11 @@ public final class RecordedRequest {
     private final byte[] body;
     private final int sequenceNumber;
     private final String sslProtocol;
+    private final String sslCipherSuite;
+    private final Principal sslLocalPrincipal;
+    private final Principal sslPeerPrincipal;
+    private final Certificate[] sslLocalCertificates;
+    private final Certificate[] sslPeerCertificates;
 
     public RecordedRequest(String requestLine, List<String> headers, List<Integer> chunkSizes,
             int bodySize, byte[] body, int sequenceNumber, Socket socket) {
@@ -47,9 +57,28 @@ public final class RecordedRequest {
 
         if (socket instanceof SSLSocket) {
             SSLSocket sslSocket = (SSLSocket) socket;
-            sslProtocol = sslSocket.getSession().getProtocol();
+            SSLSession session = sslSocket.getSession();
+            sslProtocol = session.getProtocol();
+            sslCipherSuite = session.getCipherSuite();
+            sslLocalPrincipal = session.getLocalPrincipal();
+            sslLocalCertificates = session.getLocalCertificates();
+            Principal peerPrincipal = null;
+            Certificate[] peerCertificates = null;
+            try {
+                peerPrincipal = session.getPeerPrincipal();
+                peerCertificates = session.getPeerCertificates();
+            } catch (SSLPeerUnverifiedException e) {
+                // No-op: use nulls instead
+            }
+            sslPeerPrincipal = peerPrincipal;
+            sslPeerCertificates = peerCertificates;
         } else {
             sslProtocol = null;
+            sslCipherSuite = null;
+            sslLocalPrincipal = null;
+            sslLocalCertificates = null;
+            sslPeerPrincipal = null;
+            sslPeerCertificates = null;
         }
 
         if (requestLine != null) {
@@ -154,11 +183,56 @@ public final class RecordedRequest {
     }
 
     /**
-     * Returns the connection's SSL protocol like {@code TLSv1}, {@code SSLv3},
-     * {@code NONE} or null if the connection doesn't use SSL.
+     * Returns the SSL connection's protocol like {@code TLSv1}, {@code SSLv3},
+     * {@code NONE} or {@code null} if the connection doesn't use SSL.
      */
     public String getSslProtocol() {
         return sslProtocol;
+    }
+
+    /**
+     * Returns the SSL connection's cipher protocol retrieved using
+     * {@code sslSocket.getSession().getCipherSuite()} or {@code null} if the connection doesn't
+     * use SSL.
+     */
+    public String getSslCipherSuite() {
+        return sslCipherSuite;
+    }
+
+    /**
+     * Returns the SSL connection's local principal retrieved using
+     * {@code sslSocket.getSession().getLocalPrincipal()} or {@code null} if the connection doesn't
+     * use SSL.
+     */
+    public Principal getSslLocalPrincipal() {
+        return sslLocalPrincipal;
+    }
+
+    /**
+     * Returns the SSL connection's local certificates retrieved using
+     * {@code sslSocket.getSession().getLocalCertificates()} or {@code null} if the connection
+     * doesn't use SSL.
+     */
+    public Certificate[] getSslLocalCertificates() {
+        return sslLocalCertificates;
+    }
+
+    /**
+     * Returns the SSL connection's peer principal retrieved using
+     * {@code sslSocket.getSession().getPeerPrincipal()}, or {@code null} if the connection doesn't
+     * use SSL or the peer has not been verified.
+     */
+    public Principal getSslPeerPrincipal() {
+        return sslPeerPrincipal;
+    }
+
+    /**
+     * Returns the SSL connection's peer certificates retrieved using
+     * {@code sslSocket.getSession().getPeerCertificates()}, or {@code null} if the connection
+     * doesn't use SSL or the peer has not been verified.
+     */
+    public Certificate[] getSslPeerCertificates() {
+        return sslPeerCertificates;
     }
 
     @Override public String toString() {
